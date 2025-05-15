@@ -1,0 +1,6 @@
+streamlit 
+streamlit-webrtc 
+torch 
+transformers 
+pillow 
+opencv-python-headless
