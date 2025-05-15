@@ -4,4 +4,3 @@ torch
 transformers 
 pillow 
 opencv-python-headless
-flash-attn
