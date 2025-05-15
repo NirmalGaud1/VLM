@@ -21,6 +21,8 @@ if "description" not in st.session_state:
     st.session_state.description = ""
 if "frame_queue" not in st.session_state:
     st.session_state.frame_queue = queue.Queue(maxsize=2)
+if "running" not in st.session_state:
+    st.session_state.running = False
 
 # Load model and processor
 @st.cache_resource
@@ -51,20 +53,26 @@ if not cap.isOpened():
 # Placeholder for live feed
 frame_placeholder = st.empty()
 
-# Button to start/stop processing
-if "running" not in st.session_state:
-    st.session_state.running = False
-
+# Start/Stop button
 if st.button("Start/Stop Webcam"):
     st.session_state.running = not st.session_state.running
+    if not st.session_state.running:
+        cap.release()  # Release webcam when stopped
+        frame_placeholder.empty()  # Clear live feed
+        st.session_state.description = ""  # Clear description
+        st.session_state.frames = []  # Clear frames
+        st.session_state.frame_queue = queue.Queue(maxsize=2)  # Reset queue
 
 # Main loop
 while st.session_state.running and cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         st.error("Failed to capture frame.")
+        st.session_state.running = False
         break
 
+    # Resize frame for faster processing
+    frame = cv2.resize(frame, (320, 240))
     # Convert BGR to RGB
     img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb)
@@ -102,7 +110,7 @@ while st.session_state.running and cap.isOpened():
                 inputs = inputs.to(DEVICE)
 
                 # Generate outputs
-                generated_ids = model.generate(**inputs, max_new_tokens=200)  # Reduced for speed
+                generated_ids = model.generate(**inputs, max_new_tokens=150)  # Further reduced for speed
                 generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
             # Update session state
@@ -125,23 +133,22 @@ while st.session_state.running and cap.isOpened():
         with col2:
             st.image(st.session_state.frames[1], caption="Frame 2", use_column_width=True)
 
-    # Small delay to prevent overwhelming Streamlit
-    time.sleep(0.1)
-
-# Release webcam when stopped
-if not st.session_state.running:
-    cap.release()
+    # Control frame rate
+    time.sleep(0.2)  # Increased to reduce CPU load
 
 # Instructions
 st.markdown("""
 ### Instructions
-1. Ensure your webcam is connected and not used by other apps.
+1. Ensure your webcam is connected and not used by other apps (e.g., Zoom).
 2. Click "Start/Stop Webcam" to begin capturing frames.
 3. The app processes pairs of frames and displays descriptions.
-4. Click the button again to stop.
+4. Click the button again to stop and release the webcam.
 
 ### Troubleshooting
-- **Webcam Access**: Close other apps using the webcam (e.g., Zoom, Skype).
-- **Performance**: Processing is slow on CPU. Use a GPU for better performance.
-- **Live Feed**: If the feed is laggy, ensure your system has enough resources.
+- **Webcam Access**: Close other apps using the webcam. Try `cv2.VideoCapture(1)` if `0` fails.
+- **Performance**: Use a GPU for faster processing. If laggy, increase `time.sleep` to 0.3.
+- **Model Errors**: Ensure internet access for model download and compatible PyTorch version.
+- **Live Feed**: If the feed doesn’t update, restart the app and ensure sufficient system resources.
+
+**Note**: This app works locally. For cloud deployment, contact the developer for WebRTC-based solutions.
 """)
