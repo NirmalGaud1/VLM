@@ -6,9 +6,11 @@ import numpy as np
 from transformers import AutoProcessor, AutoModelForVision2Seq
 import queue
 import time
+import os
 
 # Set device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+st.write(f"Using device: {DEVICE}")
 
 # Streamlit app layout
 st.title("Live Webcam Image Description")
@@ -40,14 +42,23 @@ def load_model():
         return None, None
 
 processor, model = load_model()
-
 if processor is None or model is None:
     st.stop()
 
+# Function to find available webcam
+def find_webcam(max_index=5):
+    for index in range(max_index):
+        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if cap.isOpened():
+            st.write(f"Webcam found at index {index}")
+            return cap, index
+        cap.release()
+    return None, -1
+
 # Initialize webcam
-cap = cv2.VideoCapture(0)  # 0 is the default webcam
-if not cap.isOpened():
-    st.error("Cannot access webcam. Ensure it is connected and not in use by another app.")
+cap, webcam_index = find_webcam()
+if cap is None:
+    st.error("No webcam found. Check connections, permissions, or try a different index.")
     st.stop()
 
 # Placeholder for live feed
@@ -57,11 +68,11 @@ frame_placeholder = st.empty()
 if st.button("Start/Stop Webcam"):
     st.session_state.running = not st.session_state.running
     if not st.session_state.running:
-        cap.release()  # Release webcam when stopped
-        frame_placeholder.empty()  # Clear live feed
-        st.session_state.description = ""  # Clear description
-        st.session_state.frames = []  # Clear frames
-        st.session_state.frame_queue = queue.Queue(maxsize=2)  # Reset queue
+        cap.release()
+        frame_placeholder.empty()
+        st.session_state.description = ""
+        st.session_state.frames = []
+        st.session_state.frame_queue = queue.Queue(maxsize=2)
 
 # Main loop
 while st.session_state.running and cap.isOpened():
@@ -110,7 +121,7 @@ while st.session_state.running and cap.isOpened():
                 inputs = inputs.to(DEVICE)
 
                 # Generate outputs
-                generated_ids = model.generate(**inputs, max_new_tokens=150)  # Further reduced for speed
+                generated_ids = model.generate(**inputs, max_new_tokens=100)  # Reduced for speed
                 generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
             # Update session state
@@ -134,21 +145,30 @@ while st.session_state.running and cap.isOpened():
             st.image(st.session_state.frames[1], caption="Frame 2", use_column_width=True)
 
     # Control frame rate
-    time.sleep(0.2)  # Increased to reduce CPU load
+    time.sleep(0.3)  # Increased to reduce load
 
-# Instructions
+# Release webcam when stopped
+if not st.session_state.running:
+    cap.release()
+
+# Instructions and troubleshooting
 st.markdown("""
 ### Instructions
-1. Ensure your webcam is connected and not used by other apps (e.g., Zoom).
+1. Ensure your webcam is connected and not used by other apps.
 2. Click "Start/Stop Webcam" to begin capturing frames.
 3. The app processes pairs of frames and displays descriptions.
-4. Click the button again to stop and release the webcam.
+4. Click the button again to stop.
 
 ### Troubleshooting
-- **Webcam Access**: Close other apps using the webcam. Try `cv2.VideoCapture(1)` if `0` fails.
-- **Performance**: Use a GPU for faster processing. If laggy, increase `time.sleep` to 0.3.
-- **Model Errors**: Ensure internet access for model download and compatible PyTorch version.
-- **Live Feed**: If the feed doesn’t update, restart the app and ensure sufficient system resources.
+- **Webcam Not Found**:
+  - Check if the webcam is connected: `ls /dev/video*` in terminal.
+  - Ensure no other apps (e.g., Zoom) are using the webcam.
+  - Verify permissions: Run `sudo usermod -a -G video $USER` and reboot.
+  - Install V4L2: `sudo apt-get install v4l-utils` and test with `v4l2loopback`.
+  - Try a USB webcam or different index (edit code to test indices 0-5).
+- **Performance**: Use a GPU for faster processing. Increase `time.sleep` to 0.5 if laggy.
+- **Runtime Errors**: If event loop errors persist, try Python 3.11 or downgrade Streamlit (`pip install streamlit==1.35.0`).
+- **Model Download**: Install `hf_xet` for faster downloads: `pip install hf_xet`.
 
-**Note**: This app works locally. For cloud deployment, contact the developer for WebRTC-based solutions.
+**Note**: This app works locally. For cloud deployment, contact the developer for WebRTC solutions.
 """)
