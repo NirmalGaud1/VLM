@@ -24,15 +24,22 @@ if "description" not in st.session_state:
 # Load model and processor (load once to avoid reloading)
 @st.cache_resource
 def load_model():
-    processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-Base")
-    model = AutoModelForVision2Seq.from_pretrained(
-        "HuggingFaceTB/SmolVLM-Base",
-        torch_dtype=torch.bfloat16,
-        _attn_implementation="flash_attention_2" if DEVICE == "cuda" else "eager",
-    ).to(DEVICE)
-    return processor, model
+    try:
+        processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-Base")
+        model = AutoModelForVision2Seq.from_pretrained(
+            "HuggingFaceTB/SmolVLM-Base",
+            torch_dtype=torch.bfloat16,
+            _attn_implementation="flash_attention_2" if DEVICE == "cuda" else "eager",
+        ).to(DEVICE)
+        return processor, model
+    except Exception as e:
+        st.error(f"Failed to load model: {str(e)}")
+        return None, None
 
 processor, model = load_model()
+
+if processor is None or model is None:
+    st.stop()
 
 # Video processor class for webcam streaming
 class VideoProcessor(VideoProcessorBase):
@@ -88,12 +95,27 @@ class VideoProcessor(VideoProcessorBase):
 
         return frame
 
-# Webcam streaming
+# Webcam streaming with enhanced STUN/TURN configuration
 st.subheader("Webcam Feed")
 ctx = webrtc_streamer(
     key="webcam",
     video_processor_factory=VideoProcessor,
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {
+                "urls": ["turn:openrelay.metered.ca:80"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": ["turn:openrelay.metered.ca:443"],
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+        ]
+    },
     media_stream_constraints={"video": True, "audio": False},
 )
 
@@ -110,7 +132,7 @@ if st.session_state.frames:
     with col2:
         st.image(st.session_state.frames[1], caption="Frame 2", use_column_width=True)
 
-# Instructions
+# Instructions and troubleshooting
 st.markdown("""
 ### Instructions
 1. Allow webcam access when prompted.
@@ -118,5 +140,13 @@ st.markdown("""
 3. View the generated description and the processed frames below.
 4. Ensure good lighting and a clear view for better results.
 
-**Note**: Processing may be slow on CPU. For optimal performance, use a GPU with CUDA.
+### Troubleshooting
+- **Connection Error**: If you see a "Connection is taking longer than expected" error, try:
+  - Switching to a different network (e.g., mobile hotspot).
+  - Checking browser permissions for webcam access.
+  - Using a different browser (Chrome or Firefox recommended).
+- **Performance**: Processing may be slow on CPU. Use a GPU with CUDA for better performance.
+- **TURN Servers**: The app uses public STUN/TURN servers. If issues persist, consider setting up your own TURN server (e.g., using Coturn).
+
+**Note**: The TURN server used is for testing. For production, set up your own TURN server for reliability.
 """)
