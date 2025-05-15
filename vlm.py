@@ -1,27 +1,28 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import torch
 from PIL import Image
 import cv2
 import numpy as np
 from transformers import AutoProcessor, AutoModelForVision2Seq
-import av
 import queue
+import time
 
 # Set device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Streamlit app layout
-st.title("Live Webcam Image Description with SmolVLM")
-st.write("This app captures live webcam frames and generates descriptions for pairs of frames.")
+st.title("Live Webcam Image Description")
+st.write("This app captures webcam frames and describes pairs of frames using SmolVLM.")
 
-# Initialize session state for storing frames and descriptions
+# Initialize session state
 if "frames" not in st.session_state:
     st.session_state.frames = []
 if "description" not in st.session_state:
     st.session_state.description = ""
+if "frame_queue" not in st.session_state:
+    st.session_state.frame_queue = queue.Queue(maxsize=2)
 
-# Load model and processor (load once to avoid reloading)
+# Load model and processor
 @st.cache_resource
 def load_model():
     try:
@@ -41,112 +42,106 @@ processor, model = load_model()
 if processor is None or model is None:
     st.stop()
 
-# Video processor class for webcam streaming
-class VideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.frame_queue = queue.Queue(maxsize=2)  # Store up to 2 frames
+# Initialize webcam
+cap = cv2.VideoCapture(0)  # 0 is the default webcam
+if not cap.isOpened():
+    st.error("Cannot access webcam. Ensure it is connected and not in use by another app.")
+    st.stop()
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-        # Convert BGR (OpenCV) to RGB (PIL)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
+# Placeholder for live feed
+frame_placeholder = st.empty()
 
-        # Add frame to queue
+# Button to start/stop processing
+if "running" not in st.session_state:
+    st.session_state.running = False
+
+if st.button("Start/Stop Webcam"):
+    st.session_state.running = not st.session_state.running
+
+# Main loop
+while st.session_state.running and cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        st.error("Failed to capture frame.")
+        break
+
+    # Convert BGR to RGB
+    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(img_rgb)
+
+    # Display live feed
+    frame_placeholder.image(img_rgb, channels="RGB", caption="Live Webcam Feed")
+
+    # Add frame to queue
+    try:
+        st.session_state.frame_queue.put_nowait(pil_img)
+    except queue.Full:
+        st.session_state.frame_queue.get()
+        st.session_state.frame_queue.put(pil_img)
+
+    # Process if 2 frames are available
+    if st.session_state.frame_queue.qsize() == 2:
+        frames = list(st.session_state.frame_queue.queue)
         try:
-            self.frame_queue.put_nowait(pil_img)
-        except queue.Full:
-            self.frame_queue.get()  # Remove oldest frame
-            self.frame_queue.put(pil_img)
+            # Create input messages
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "image"},
+                        {"type": "text", "text": "Can you describe the two images?"}
+                    ]
+                },
+            ]
 
-        # If we have 2 frames, process them
-        if self.frame_queue.qsize() == 2:
-            frames = list(self.frame_queue.queue)
-            try:
-                # Create input messages
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image"},
-                            {"type": "image"},
-                            {"type": "text", "text": "Can you describe the two images?"}
-                        ]
-                    },
-                ]
-
-                # Prepare inputs
+            # Prepare inputs
+            with st.spinner("Processing frames..."):
                 prompt = processor.apply_chat_template(messages, add_generation_prompt=True)
                 inputs = processor(text=prompt, images=frames, return_tensors="pt")
                 inputs = inputs.to(DEVICE)
 
                 # Generate outputs
-                generated_ids = model.generate(**inputs, max_new_tokens=500)
-                generated_texts = processor.batch_decode(
-                    generated_ids, skip_special_tokens=True
-                )
+                generated_ids = model.generate(**inputs, max_new_tokens=200)  # Reduced for speed
+                generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=True)
 
-                # Update session state with description
-                st.session_state.description = generated_texts[0]
-                st.session_state.frames = frames  # Store frames for display
+            # Update session state
+            st.session_state.description = generated_texts[0]
+            st.session_state.frames = frames
 
-            except Exception as e:
-                st.session_state.description = f"Error processing frames: {str(e)}"
+        except Exception as e:
+            st.session_state.description = f"Error processing frames: {str(e)}"
 
-        return frame
+    # Display description and frames
+    if st.session_state.description:
+        st.subheader("Generated Description")
+        st.write(st.session_state.description)
 
-# Webcam streaming with enhanced STUN/TURN configuration
-st.subheader("Webcam Feed")
-ctx = webrtc_streamer(
-    key="webcam",
-    video_processor_factory=VideoProcessor,
-    rtc_configuration={
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {
-                "urls": ["turn:openrelay.metered.ca:80"],
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
-            {
-                "urls": ["turn:openrelay.metered.ca:443"],
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
-        ]
-    },
-    media_stream_constraints={"video": True, "audio": False},
-)
+    if st.session_state.frames:
+        st.subheader("Processed Frames")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(st.session_state.frames[0], caption="Frame 1", use_column_width=True)
+        with col2:
+            st.image(st.session_state.frames[1], caption="Frame 2", use_column_width=True)
 
-# Display description and frames
-if st.session_state.description:
-    st.subheader("Generated Description")
-    st.write(st.session_state.description)
+    # Small delay to prevent overwhelming Streamlit
+    time.sleep(0.1)
 
-if st.session_state.frames:
-    st.subheader("Processed Frames")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(st.session_state.frames[0], caption="Frame 1", use_column_width=True)
-    with col2:
-        st.image(st.session_state.frames[1], caption="Frame 2", use_column_width=True)
+# Release webcam when stopped
+if not st.session_state.running:
+    cap.release()
 
-# Instructions and troubleshooting
+# Instructions
 st.markdown("""
 ### Instructions
-1. Allow webcam access when prompted.
-2. The app captures live frames and processes pairs of frames when available.
-3. View the generated description and the processed frames below.
-4. Ensure good lighting and a clear view for better results.
+1. Ensure your webcam is connected and not used by other apps.
+2. Click "Start/Stop Webcam" to begin capturing frames.
+3. The app processes pairs of frames and displays descriptions.
+4. Click the button again to stop.
 
 ### Troubleshooting
-- **Connection Error**: If you see a "Connection is taking longer than expected" error, try:
-  - Switching to a different network (e.g., mobile hotspot).
-  - Checking browser permissions for webcam access.
-  - Using a different browser (Chrome or Firefox recommended).
-- **Performance**: Processing may be slow on CPU. Use a GPU with CUDA for better performance.
-- **TURN Servers**: The app uses public STUN/TURN servers. If issues persist, consider setting up your own TURN server (e.g., using Coturn).
-
-**Note**: The TURN server used is for testing. For production, set up your own TURN server for reliability.
+- **Webcam Access**: Close other apps using the webcam (e.g., Zoom, Skype).
+- **Performance**: Processing is slow on CPU. Use a GPU for better performance.
+- **Live Feed**: If the feed is laggy, ensure your system has enough resources.
 """)
